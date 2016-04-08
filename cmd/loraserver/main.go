@@ -92,6 +92,7 @@ func run(c *cli.Context) {
 		loraserver.NewApplicationAPI(ctx),
 		loraserver.NewNodeAPI(ctx),
 		loraserver.NewNodeSessionAPI(ctx),
+		loraserver.NewNodeMacCommandsAPI(ctx),
 	)
 	if err != nil {
 		log.Fatal(err)
