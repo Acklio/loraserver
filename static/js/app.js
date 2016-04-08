@@ -186,5 +186,45 @@ loraserverControllers.controller('NodeListCtrl', ['$scope', '$http', '$routePara
                 $('#editModal').modal().on('hidden.bs.modal', function() { history.go(-1); });
             });
         };
+
+        $scope.showSentMacCommands = function(showSent) {
+            showSent = showSent && $scope.data.Last != null;
+            $scope.showSent = showSent;
+
+            if (showSent) {
+              $scope.macCommands = $scope.data.Last.MacCommands;
+              $scope.replies = $scope.data.Last.Response;
+            } else {
+              $scope.macCommands = $scope.data.Next;
+              $scope.replies = null;
+            }
+        }
+
+        $scope.macCmds = function(node, showSent) {
+            $http.rpc('NodeMacCommands.GetMacCmdsToBeSent', node.devEUI).success(function(data) {
+                if (data.error != null) {
+                    console.error(data.error);
+                }
+                console.log(data.result);
+                $scope.error = data.error;
+                $scope.node = node;
+                $scope.data = data.result;
+
+                $scope.showSent = showSent;
+                $scope.showSentMacCommands(showSent);
+                $('#macCommandsModal').modal().on('hidden.bs.modal', function() { history.go(-1); });
+            });
+        };
+
+        $scope.updateMacCommands = function(node, macCommands) {
+            macCommands.devEUI = node.devEUI;
+            $http.rpc('NodeMacCommands.Update', macCommands).success(function(data) {
+                if (data.error == null) {
+                    $('#macCommandsModal').modal('hide');
+                }
+                $scope.error = data.error;
+            });
+        };
+
         $scope.page = 'nodes';
     }]);

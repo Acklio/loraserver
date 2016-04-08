@@ -15,6 +15,7 @@
         <td>{{ node.appEUI }}</td>
         <td>{{ node.appKey }}</td>
         <td class="text-right">
+          <a class="btn btn-sm btn-default" ng-click="macCmds(node, false)">MAC commands</a>
           <a class="btn btn-sm btn-default" ng-click="session(node)">Session / ABP</a>
           <a class="btn btn-sm btn-default" href="/#/nodes/{{ node.devEUI }}" data-toggle="modal" data-target="#myModal">Edit</a>
           <button class="btn btn-sm btn-danger" ng-click="delete(node)">Delete</a>
@@ -132,6 +133,141 @@
       <div class="pull-left text-danger" ng-if="error">{{ error }}</div>
         <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
         <button type="button" class="btn btn-primary" ng-click="updateSession(ns)">Save changes</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="macCommandsModal" tabindex="-1" role="dialog" aria-labelledby="myModalLabel">
+  <div class="modal-dialog" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <button type="button" class="close" data-dismiss="modal" aria-label="Close"><span aria-hidden="true">&times;</span></button>
+        <h4 class="modal-title" id="myModalLabel">Mac commands to be sent to {{ node.devEUI }}</h4>
+      </div>
+      <div class="modal-body">
+        <ul class="nav nav-tabs">
+          <li role="presentation"
+            ng-class="{active: !showSent}">
+            <a ng-click="showSentMacCommands(false)">Edit next MAC commands to be sent</a>
+          </li>
+          <li role="presentation"
+              ng-disabled="{{ data.Last == null}}"
+              ng-class="{active: showSent}">
+            <a ng-click="showSentMacCommands(true)">See last result</a>
+          </li>
+        </ul>
+        <form>
+          <div>
+            <fieldset name="dutyCycle">
+              <legend>Duty Cycle</legend>
+              <label for="dutyCycle" class="control-label">New Duty Cycle value:</label>
+              <input type="number" min="0" max="15" class="form-control" id="dutyCycle" ng-disabled="showSent" ng-model="macCommands.DutyCycle.MaxDCCycle"
+                     placeholder="Empty to keeps the current value" />
+            </fieldset>
+            <div ng-show="replies.DutyCycle">Reply: OK</div>
+          </div>
+          <div class="form-group">
+            <fieldset name="deviceStatus">
+              <legend>Device Status</legend>
+              <label for="deviceStatus" class="control-label">
+                <input type="checkbox" id="deviceStatus" ng-disabled="showSent" ng-model="macCommands.DevStatus"/>
+                <span>Request Device Status<span>
+              </label>
+
+            </fieldset>
+            <div ng-show="replies.DevStatus">Reply: Battery: {{ replies.DevStatus.Battery }},
+              Signal Margin: {{ replies.DevStatus.Margin }}</div>
+          </div>
+          <div class="form-group">
+            <fieldset name="linkADR">
+              <legend>Link Adaptive data rate</legend>
+              <div id="linkADR">
+                <div>
+                  <label for="dataRate">Data Rate:</label>
+                  <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.LinkADR.DataRate" id="dataRate" min="0" max="255" />
+                </div>
+                <div>
+                  <label for="txPower">TXPower:</label>
+                  <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.LinkADR.TXPower" id="txPower" min="0" max="255" />
+                </div>
+                <div>
+                  <label for="channelsMas">Channels Mask:</label>
+                  <span id="channelsMask" class="form-control">
+                    <label ng-repeat="i in macCommands.LinkADR.ChMask track by $index" for="chMask{{ $index }}">
+                      <input type="checkbox" ng-disabled="showSent" ng-model="macCommands.LinkADR.ChMask[$index]" value="{{ $index }}" id="chMask{{ $index }}" />
+                      <span>{{ $index }}</span>
+                    </label>
+                  </span>
+                </div>
+                <div>
+                  <label for="chMaskCntl">Channel Mask Control:</label>
+                  <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.LinkADR.Redundancy.ChMaskCntl" id="chMaskCntl" min="0" max="15" />
+                </div>
+                <div>
+                  <label for="nbRep">Number of Repetitions:</label>
+                  <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.LinkADR.Redundancy.NbRep" id="nbRep" min="0" max="15" />
+                </div>
+              </div>
+            </fieldset>
+            <div ng-show="{{ replies.LinkADR }}">Reply: {{ replies.LinkADR.ChannelMaskACK && replies.LinkADR.DataRateACK && replies.LinkADR.PowerACK ? "OK" : "Fail" }}</div>
+          </div>
+          <div class="form-group">
+            <fieldset name="rx2Setup">
+              <legend>RXParamSetupReq</legend>
+              <div>
+                <label for="rx2DataRate">RX2 Data rate:</label>
+                <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.RX2Setup.DLsettings.RX2DataRate" id="rx2DataRate" min="0" max="15" />
+              </div>
+              <div>
+                <label for="rx1DRoffset">RX1 Data rate offset:</label>
+                <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.RX2Setup.DLsettings.RX1DRoffset" id="rx1DRoffset" min="0" max="8" />
+              </div>
+              <div>
+                <label for="frequency">RX2 Frequency:</label>
+                <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.RX2Setup.Frequency" id="frequency" min="0" max="16777215" />
+              </div>
+            </fieldset>
+            <div ng-show="replies.RX2Setup">Reply: {{ replies.RX2Setup.ChannelACK && replies.RX2Setup.RX2DataRateACK && replies.RX2Setup.RX1DRoffsetACK ? "OK" : "Fail" }}</div>
+          </div>
+          <div class="form-group">
+            <fieldset name="newChannel">
+              <legend>NewChannel</legend>
+              <div>
+                <label for="chIndex">Channel Index:</label>
+                <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.NewChannel.ChIndex" id="chIndex" min="1" max="15" />
+              </div>
+              <div>
+                <label for="newChFrequency">Frequency:</label>
+                <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.NewChannel.Freq" id="newChFrequency" min="0" max="16777215" />
+              </div>
+              <div>
+                <label for="minDR">Min Data Rate:</label>
+                <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.NewChannel.MinDR" id="minDR" min="0" max="15" />
+              </div>
+              <div>
+                <label for="maxDR">Max Data Rate:</label>
+                <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.NewChannel.MaxDR" id="maxDR" min="0" max="15" />
+              </div>
+            </fieldset>
+            <div ng-show="replies.NewChannel">Reply: {{ replies.NewChannel.ChannelFrequencyOK && replies.NewChannel.DataRateRangeOK == 0 ? "OK" : "Fail" }}</div>
+          </div>
+          <div class="form-group">
+            <fieldset name="rxTimingSetup">
+              <legend>RXTimingSetup</legend>
+              <div>
+                <label for="rxTimingSetup">RXTimingSetup:</label>
+                <input type="number" class="form-control" ng-disabled="showSent" ng-model="macCommands.RXTimingSetup.Delay" id="rxTimingSetup" min="0" max="15" />
+              </div>
+            </fieldset>
+            <div ng-show="replies.RXTimingSetup">Reply: OK</div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+      <div class="pull-left text-danger" ng-if="error">{{ error }}</div>
+        <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
+        <button type="button" ng-disabled="showSent" class="btn btn-primary" ng-click="updateMacCommands(node, macCommands)">Save changes</button>
       </div>
     </div>
   </div>
