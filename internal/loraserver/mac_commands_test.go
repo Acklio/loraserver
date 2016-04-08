@@ -168,6 +168,10 @@ func TestMacCommandsSaving(t *testing.T) {
 		macCommandsWithResponse := MacCommandsWithResponse{
 			MacCommands: macCommands,
 		}
+		otherMacCommands := MacCommands{
+			DevEUI:    devEUI,
+			DevStatus: true,
+		}
 
 		conn := p.Get()
 		defer conn.Close()
@@ -192,6 +196,18 @@ func TestMacCommandsSaving(t *testing.T) {
 					So(*data, ShouldResemble, macCommandsWithResponse)
 				})
 			})
+
+			Convey("When it is updated", func() {
+				updatedDevEUI, err := updateMacCommandsToBeSent(p, otherMacCommands)
+				So(err, ShouldBeNil)
+				So(updatedDevEUI, ShouldEqual, devEUI)
+
+				Convey("Then the mac commands to be sent is the excpected", func() {
+					data, err := getMacCommandsToBeSent(p, devEUI)
+					So(err, ShouldBeNil)
+					So(data, ShouldResemble, otherMacCommands)
+				})
+			})
 		})
 
 		Convey("Then there are no last mac commands", func() {
@@ -211,18 +227,14 @@ func TestMacCommandsSaving(t *testing.T) {
 			})
 
 			Convey("Given there is another mac command pending", func() {
-				newMacCommands := MacCommands{
-					DevEUI:    devEUI,
-					DevStatus: true,
-				}
-				err := saveInRedis(conn, fmt.Sprintf(macCommandsKeyTempl, devEUI), newMacCommands)
+				err := saveInRedis(conn, fmt.Sprintf(macCommandsKeyTempl, devEUI), otherMacCommands)
 				So(err, ShouldBeNil)
 
 				Convey("Then both can be retrieved with getNextAndLastMacCommands", func() {
 					data, err := getNextAndLastMacCommands(p, devEUI)
 					So(err, ShouldBeNil)
 					expectedData := NextAndLastMacCommands{
-						Next: &newMacCommands,
+						Next: &otherMacCommands,
 						Last: &macCommandsWithResponse,
 					}
 					So(data, ShouldResemble, expectedData)
@@ -241,6 +253,99 @@ func TestMacCommandsSaving(t *testing.T) {
 					So(data.Response, ShouldResemble, macCommandsResponse)
 				})
 			})
+		})
+	})
+}
+
+func TestFromMacCommandsSlice(t *testing.T) {
+	Convey("Given an empty response slice", t, func() {
+		var responseSlice []lorawan.MACCommand = nil
+		Convey("When converted to MacCommandsResponse", func() {
+			response, linkCheckReply, err := fromMacCommandSlice(responseSlice, 1, 0)
+			So(err, ShouldBeNil)
+
+			Convey("Then linkCheckReply should be absent", func() {
+				So(linkCheckReply, ShouldBeNil)
+			})
+
+			Convey("Then response has zero-value", func() {
+				So(response, ShouldResemble, MacCommandsResponse{})
+			})
+		})
+	})
+
+	Convey("Given a response slice with all the possible mac commands", t, func() {
+		devStatus := lorawan.DevStatusAnsPayload{
+			Battery: 5,
+			Margin:  1,
+		}
+
+		linkADR := lorawan.LinkADRAnsPayload{
+			ChannelMaskACK: true,
+			DataRateACK:    true,
+			PowerACK:       true,
+		}
+
+		rx2Setup := lorawan.RX2SetupAnsPayload{
+			ChannelACK:     true,
+			RX1DRoffsetACK: true,
+			RX2DataRateACK: true,
+		}
+
+		newChannel := lorawan.NewChannelAnsPayload{
+			ChannelFrequencyOK: true,
+			DataRateRangeOK:    true,
+		}
+
+		responseSlice := []lorawan.MACCommand{
+			lorawan.MACCommand{
+				CID: lorawan.LinkCheckReq,
+			},
+			lorawan.MACCommand{
+				CID:     lorawan.LinkADRAns,
+				Payload: &linkADR,
+			},
+			lorawan.MACCommand{
+				CID: lorawan.DutyCycleAns,
+			},
+			lorawan.MACCommand{
+				CID:     lorawan.RXParamSetupAns,
+				Payload: &rx2Setup,
+			},
+			lorawan.MACCommand{
+				CID:     lorawan.DevStatusAns,
+				Payload: &devStatus,
+			},
+			lorawan.MACCommand{
+				CID:     lorawan.NewChannelAns,
+				Payload: &newChannel,
+			},
+			lorawan.MACCommand{
+				CID: lorawan.RXTimingSetupAns,
+			},
+		}
+
+		Convey("Then all the relevant data is extracted", func() {
+			response, linkCheckReply, err := fromMacCommandSlice(responseSlice, 1, 2)
+			So(err, ShouldBeNil)
+
+			So(*response.LinkADR, ShouldResemble, linkADR)
+			So(response.DutyCycle, ShouldBeTrue)
+			So(*response.RX2Setup, ShouldResemble, rx2Setup)
+			So(*response.DevStatus, ShouldResemble, devStatus)
+			So(*response.NewChannel, ShouldResemble, newChannel)
+			So(response.RXTimingSetup, ShouldBeTrue)
+
+			expectedLinkCheckReply := []lorawan.MACCommand{
+				lorawan.MACCommand{
+					CID: lorawan.LinkCheckAns,
+					Payload: &lorawan.LinkCheckAnsPayload{
+						Margin: 2,
+						GwCnt:  1,
+					},
+				},
+			}
+			So(linkCheckReply, ShouldResemble, expectedLinkCheckReply)
 		})
 	})
 }

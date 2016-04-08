@@ -95,41 +95,41 @@ func handleMACCommandLinkCheckReq(rxPacketsCount uint8, margin uint8) lorawan.MA
 	}
 }
 
-func handleMACCommandLinkADRAns(payload lorawan.MACCommandPayload) (*lorawan.LinkADRAnsPayload, error) {
+func extractLinkADRAns(payload lorawan.MACCommandPayload) (*lorawan.LinkADRAnsPayload, error) {
 	linkADRAnsPayload, ok := payload.(*lorawan.LinkADRAnsPayload)
 
 	if !ok {
-		return linkADRAnsPayload, fmt.Errorf("Unexpected payload given to handleMACCommandLinkADRAns: %T", payload)
+		return linkADRAnsPayload, fmt.Errorf("Unexpected payload given to extractLinkADRAns: %T", payload)
 	}
 
 	return linkADRAnsPayload, nil
 }
 
-func handleMACCommandRXParamSetupAns(payload lorawan.MACCommandPayload) (*lorawan.RX2SetupAnsPayload, error) {
+func extractRXParamSetupAns(payload lorawan.MACCommandPayload) (*lorawan.RX2SetupAnsPayload, error) {
 	rx2SetupAnsPayload, ok := payload.(*lorawan.RX2SetupAnsPayload)
 
 	if !ok {
-		return rx2SetupAnsPayload, fmt.Errorf("Unexpected payload given to handleMACCommandRXParamSetupAns: %T", payload)
+		return rx2SetupAnsPayload, fmt.Errorf("Unexpected payload given to extractRXParamSetupAns: %T", payload)
 	}
 
 	return rx2SetupAnsPayload, nil
 }
 
-func handleMACCommandDevStatusAns(payload lorawan.MACCommandPayload) (*lorawan.DevStatusAnsPayload, error) {
+func extractDevStatusAns(payload lorawan.MACCommandPayload) (*lorawan.DevStatusAnsPayload, error) {
 	devStatusAnsPayload, ok := payload.(*lorawan.DevStatusAnsPayload)
 
 	if !ok {
-		return devStatusAnsPayload, fmt.Errorf("Unexpected payload given to handleMACCommandDevStatusAns: %T", payload)
+		return devStatusAnsPayload, fmt.Errorf("Unexpected payload given to extractDevStatusAns: %T", payload)
 	}
 
 	return devStatusAnsPayload, nil
 }
 
-func handleMACCommandNewChannelAns(payload lorawan.MACCommandPayload) (*lorawan.NewChannelAnsPayload, error) {
+func extractNewChannelAns(payload lorawan.MACCommandPayload) (*lorawan.NewChannelAnsPayload, error) {
 	newChannelAnsPayload, ok := payload.(*lorawan.NewChannelAnsPayload)
 
 	if !ok {
-		return newChannelAnsPayload, fmt.Errorf("Unexpected payload given to handleMACCommandNewChannelAns: %T", payload)
+		return newChannelAnsPayload, fmt.Errorf("Unexpected payload given to extractNewChannelAns: %T", payload)
 	}
 
 	return newChannelAnsPayload, nil
@@ -152,22 +152,22 @@ func fromMacCommandSlice(macCommands []lorawan.MACCommand, rxPacketsCount uint8,
 			macCommandsResponse.RXTimingSetup = true
 			macCommandsResponse.nonEmpty = true
 		case lorawan.LinkADRAns:
-			if macCommandsResponse.LinkADR, err = handleMACCommandLinkADRAns(macCommand.Payload); err != nil {
+			if macCommandsResponse.LinkADR, err = extractLinkADRAns(macCommand.Payload); err != nil {
 				return macCommandsResponse, nil, err
 			}
 			macCommandsResponse.nonEmpty = true
 		case lorawan.RXParamSetupAns:
-			if macCommandsResponse.RX2Setup, err = handleMACCommandRXParamSetupAns(macCommand.Payload); err != nil {
+			if macCommandsResponse.RX2Setup, err = extractRXParamSetupAns(macCommand.Payload); err != nil {
 				return macCommandsResponse, nil, err
 			}
 			macCommandsResponse.nonEmpty = true
 		case lorawan.DevStatusAns:
-			if macCommandsResponse.DevStatus, err = handleMACCommandDevStatusAns(macCommand.Payload); err != nil {
+			if macCommandsResponse.DevStatus, err = extractDevStatusAns(macCommand.Payload); err != nil {
 				return macCommandsResponse, nil, err
 			}
 			macCommandsResponse.nonEmpty = true
 		case lorawan.NewChannelAns:
-			if macCommandsResponse.NewChannel, err = handleMACCommandNewChannelAns(macCommand.Payload); err != nil {
+			if macCommandsResponse.NewChannel, err = extractNewChannelAns(macCommand.Payload); err != nil {
 				return macCommandsResponse, nil, err
 			}
 			macCommandsResponse.nonEmpty = true
@@ -180,29 +180,32 @@ func fromMacCommandSlice(macCommands []lorawan.MACCommand, rxPacketsCount uint8,
 }
 
 func markMacCommandsAsSent(p *redis.Pool, devEUI lorawan.EUI64, macCommands MacCommands) error {
-	key := fmt.Sprintf(macCommandsWithResponseTempl, devEUI)
-
 	macCommandsWithResponse := MacCommandsWithResponse{
 		MacCommands: macCommands,
 	}
 
-	c := p.Get()
-	defer c.Close()
-	return saveInRedis(c, key, macCommandsWithResponse)
+	return saveInRedisMacCommandsWithResponce(p, &macCommandsWithResponse)
 }
 
 func updateSentCommandResponse(p *redis.Pool, devEUI lorawan.EUI64, response MacCommandsResponse) error {
-	key := fmt.Sprintf(macCommandsWithResponseTempl, devEUI)
-
 	macCommandsWithResponse, err := getLastMacCommandsWithResponse(p, devEUI)
 	if err != nil {
 		return err
 	}
+
 	if macCommandsWithResponse == nil {
 		return errDoesNotExist
 	}
 
 	macCommandsWithResponse.Response = response
+
+	return saveInRedisMacCommandsWithResponce(p, macCommandsWithResponse)
+}
+
+func saveInRedisMacCommandsWithResponce(p *redis.Pool, macCommandsWithResponse *MacCommandsWithResponse) error {
+	devEUI := macCommandsWithResponse.MacCommands.DevEUI
+	key := fmt.Sprintf(macCommandsWithResponseTempl, devEUI)
+
 	c := p.Get()
 	defer c.Close()
 

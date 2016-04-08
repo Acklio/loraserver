@@ -271,6 +271,105 @@ func TestHandleDataUpPackets(t *testing.T) {
 						})
 					})
 				})
+
+				var maxDCCycle uint8 = 4
+				macCommands := MacCommands{
+					DevEUI:    ns.DevEUI,
+					DevStatus: true,
+					DutyCycle: lorawan.DutyCycleReqPayload{
+						MaxDCCycle: maxDCCycle,
+					},
+				}
+				Convey("Given pending MacCommands", func() {
+					updateMacCommandsToBeSent(p, macCommands)
+
+					Convey("When calling handleRXPacket", func() {
+						So(handleRXPacket(ctx, rxPacket), ShouldBeNil)
+
+						Convey("Then the packet is received by the application backend", func() {
+							_ = <-app.rxPayloadChan
+						})
+
+						Convey("Then two identical packets are sent to the gateway (two receive windows)", func() {
+							txPacket1 := <-gw.txPacketChan
+							txPacket2 := <-gw.txPacketChan
+							So(txPacket1.PHYPayload, ShouldResemble, txPacket2.PHYPayload)
+
+							So(txPacket1.PHYPayload.DecryptFRMPayload(ns.AppSKey), ShouldBeNil)
+							macPL, ok := txPacket1.PHYPayload.MACPayload.(*lorawan.MACPayload)
+							So(ok, ShouldBeTrue)
+
+							Convey("Then these packets contain the expected values", func() {
+								So(txPacket1.PHYPayload.MHDR.MType, ShouldEqual, lorawan.ConfirmedDataDown)
+								So(macPL.FHDR.FCnt, ShouldEqual, ns.FCntDown)
+								So(*macPL.FPort, ShouldEqual, 0)
+								So(len(macPL.FRMPayload), ShouldEqual, 2)
+
+								for _, macCommandRaw := range macPL.FRMPayload {
+									macCommand, ok := macCommandRaw.(*lorawan.MACCommand)
+									So(ok, ShouldBeTrue)
+									if macCommand.CID == lorawan.DutyCycleReq {
+										So(macCommand.Payload, ShouldResemble, &lorawan.DutyCycleReqPayload{
+											MaxDCCycle: maxDCCycle,
+										})
+									}
+								}
+							})
+
+							Convey("Then the mac commands are marked as sent", func() {
+								data, err := getLastMacCommandsWithResponse(p, ns.DevEUI)
+								So(err, ShouldBeNil)
+								expectedMacCommandsWithResponse := MacCommandsWithResponse{
+									MacCommands: macCommands,
+								}
+								So(*data, ShouldResemble, expectedMacCommandsWithResponse)
+							})
+						})
+					})
+				})
+
+				Convey("Given sent MacCommands", func() {
+					macCommandsWithResponse := &MacCommandsWithResponse{
+						MacCommands: macCommands,
+					}
+					So(saveInRedisMacCommandsWithResponce(p, macCommandsWithResponse), ShouldBeNil)
+
+					Convey("Given a packet with mac commands replies", func() {
+						devStatus := lorawan.DevStatusAnsPayload{
+							Battery: 5,
+							Margin:  1,
+						}
+						responses := []lorawan.MACCommand{
+							lorawan.MACCommand{
+								CID:     lorawan.DevStatusAns,
+								Payload: &devStatus,
+							},
+						}
+
+						macPL := phy.MACPayload.(*lorawan.MACPayload)
+						macPL.FHDR.FOpts = responses
+						So(phy.SetMIC(ns.NwkSKey), ShouldBeNil)
+						rxPacket := models.RXPacket{
+							PHYPayload: phy,
+						}
+
+						Convey("When calling handleRXPacket", func() {
+							So(handleRXPacket(ctx, rxPacket), ShouldBeNil)
+
+							Convey("Then the mac commands replies are updated", func() {
+								data, err := getLastMacCommandsWithResponse(p, ns.DevEUI)
+								So(err, ShouldBeNil)
+								expectedMacCommandsWithResponse := MacCommandsWithResponse{
+									MacCommands: macCommands,
+									Response: MacCommandsResponse{
+										DevStatus: &devStatus,
+									},
+								}
+								So(*data, ShouldResemble, expectedMacCommandsWithResponse)
+							})
+						})
+					})
+				})
 			})
 
 			Convey("Given a ConfirmedDataUp packet", func() {

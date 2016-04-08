@@ -167,8 +167,9 @@ func handleCollectedDataUpPackets(ctx Context, rxPackets RXPackets) error {
 		macs = append(macs, p.RXInfo.MAC.String())
 	}
 
+	rxPacketsCount := uint8(len(rxPackets))
 	log.WithFields(log.Fields{
-		"gw_count": len(rxPackets),
+		"gw_count": rxPacketsCount,
 		"gw_macs":  strings.Join(macs, ", "),
 		"mtype":    rxPackets[0].PHYPayload.MHDR.MType,
 	}).Info("packet(s) collected")
@@ -201,7 +202,7 @@ func handleCollectedDataUpPackets(ctx Context, rxPackets RXPackets) error {
 
 			err = ctx.Application.Send(ns.DevEUI, ns.AppEUI, models.RXPayload{
 				DevEUI:       ns.DevEUI,
-				GatewayCount: len(rxPackets),
+				GatewayCount: rxPacketsCount,
 				FPort:        *macPL.FPort,
 				RSSI:         rxPacket.RXInfo.RSSI,
 				Data:         data,
@@ -220,17 +221,33 @@ func handleCollectedDataUpPackets(ctx Context, rxPackets RXPackets) error {
 
 	// handle downlink (ACK)
 	time.Sleep(CollectDataDownWait)
-	return handleDataDownReply(ctx, rxPacket, ns)
+	return handleDataDownReply(ctx, rxPacket, rxPacketsCount, ns)
 }
 
-func handleDataDownReply(ctx Context, rxPacket models.RXPacket, ns models.NodeSession) error {
+func handleDataDownReply(ctx Context, rxPacket models.RXPacket, rxPacketsCount uint8, ns models.NodeSession) error {
 	macPL, ok := rxPacket.PHYPayload.MACPayload.(*lorawan.MACPayload)
 	if !ok {
 		return fmt.Errorf("expected *lorawan.MACPayload, got: %T", rxPacket.PHYPayload.MACPayload)
 	}
 
+	var margin uint8
+	if rxPacket.RXInfo.LoRaSNR > 0 {
+		// Maybe this is not the correct way to handle
+		margin = uint8(rxPacket.RXInfo.LoRaSNR)
+	}
+
+	macCommandsResponse, macCommandReplies, err := fromMacCommandSlice(macPL.FHDR.FOpts, uint8(rxPacketsCount), margin)
+
+	if err != nil {
+		return err
+	}
+
+	if macCommandsResponse.nonEmpty {
+		updateSentCommandResponse(ctx.RedisPool, ns.DevEUI, macCommandsResponse)
+	}
+
 	// the last payload was received by the node
-	if macPL.FHDR.FCtrl.ACK {
+	if macPL.FHDR.FCtrl.ACK && !macCommandsResponse.nonEmpty {
 		if err := clearInProcessTXPayload(ctx.RedisPool, ns.DevEUI); err != nil {
 			return fmt.Errorf("could not clear in-process TXPayload: %s", err)
 		}
@@ -240,58 +257,87 @@ func handleDataDownReply(ctx Context, rxPacket models.RXPacket, ns models.NodeSe
 		}
 	}
 
-	// check if there are payloads pending in the queue
-	txPayload, remaining, err := getTXPayloadAndRemainingFromQueue(ctx.RedisPool, ns.DevEUI)
-
-	// errDoesNotExist should not be handled as an error, it just means there
-	// is no queue / the queue is empty
+	macCommands, err := getMacCommandsToBeSent(ctx.RedisPool, ns.DevEUI)
 	if err != nil && err != errDoesNotExist {
-		return fmt.Errorf("could not get TXPayload from queue: %s", err)
+		return fmt.Errorf("Could not get MAC commands: %s", err)
 	}
 
-	// nothing pending in the queue and no need to ACK RXPacket
-	if rxPacket.PHYPayload.MHDR.MType != lorawan.ConfirmedDataUp && err == errDoesNotExist {
-		return nil
+	var remaining bool
+
+	var frmPayload []lorawan.Payload
+	var confirmed bool
+	var fPort uint8
+	if err != errDoesNotExist || macCommandReplies != nil {
+		frmPayload = macCommands.MacCommandSlice()
+		for _, reply := range macCommandReplies {
+			frmPayload = append(frmPayload, &reply)
+		}
+
+		if err = markMacCommandsAsSent(ctx.RedisPool, ns.DevEUI, macCommands); err != nil {
+			return fmt.Errorf("Could not mark MAC commands as waiting response: %s", err)
+		}
+		confirmed = true
+		fPort = 0
+	} else {
+		// check if there are payloads pending in the queue
+		var txPayload models.TXPayload
+		txPayload, remaining, err = getTXPayloadAndRemainingFromQueue(ctx.RedisPool, ns.DevEUI)
+
+		// errDoesNotExist should not be handled as an error, it just means there
+		// is no queue / the queue is empty
+		if err != nil && err != errDoesNotExist {
+			return fmt.Errorf("could not get TXPayload from queue: %s", err)
+		}
+
+		// nothing pending in the queue and no need to ACK RXPacket
+		if rxPacket.PHYPayload.MHDR.MType != lorawan.ConfirmedDataUp && err == errDoesNotExist {
+			return nil
+		}
+		frmPayload = append(frmPayload, &lorawan.DataPayload{Bytes: txPayload.Data})
+		confirmed = txPayload.Confirmed
+		fPort = txPayload.FPort
 	}
 
+	if err = send(frmPayload, rxPacket, ns, ctx, remaining, confirmed, fPort); err != nil {
+		return err
+	}
+
+	// remove the payload from the queue when not confirmed
+	if !confirmed {
+		if err := clearInProcessTXPayload(ctx.RedisPool, ns.DevEUI); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func send(frmPayload []lorawan.Payload, rxPacket models.RXPacket, ns models.NodeSession, ctx Context, remaining bool, confirmed bool, fPort uint8) error {
 	phy := lorawan.PHYPayload{
 		MHDR: lorawan.MHDR{
 			MType: lorawan.UnconfirmedDataDown,
 			Major: lorawan.LoRaWANR1,
 		},
 	}
-	macPL = &lorawan.MACPayload{
+	macPL := &lorawan.MACPayload{
 		FHDR: lorawan.FHDR{
 			DevAddr: ns.DevAddr,
 			FCtrl: lorawan.FCtrl{
-				ACK: rxPacket.PHYPayload.MHDR.MType == lorawan.ConfirmedDataUp, // set ACK to true when received packet needs an ACK
+				FPending: remaining,
+				ACK:      rxPacket.PHYPayload.MHDR.MType == lorawan.ConfirmedDataUp, // set ACK to true when received packet needs an ACK
 			},
 			FCnt: ns.FCntDown,
 		},
 	}
 	phy.MACPayload = macPL
 
-	// add the payload from the queue
-	if err == nil {
-		macPL.FHDR.FCtrl.FPending = remaining
-
-		if txPayload.Confirmed {
-			phy.MHDR.MType = lorawan.ConfirmedDataDown
-		}
-		macPL.FPort = &txPayload.FPort
-		macPL.FRMPayload = []lorawan.Payload{
-			&lorawan.DataPayload{Bytes: txPayload.Data},
-		}
-		if err := phy.EncryptFRMPayload(ns.AppSKey); err != nil {
-			return fmt.Errorf("could not encrypt FRMPayload: %s", err)
-		}
-
-		// remove the payload from the queue when not confirmed
-		if !txPayload.Confirmed {
-			if err := clearInProcessTXPayload(ctx.RedisPool, ns.DevEUI); err != nil {
-				return err
-			}
-		}
+	if confirmed {
+		phy.MHDR.MType = lorawan.ConfirmedDataDown
+	}
+	macPL.FPort = &fPort
+	macPL.FRMPayload = frmPayload
+	if err := phy.EncryptFRMPayload(ns.AppSKey); err != nil {
+		return fmt.Errorf("could not encrypt FRMPayload: %s", err)
 	}
 
 	if err := phy.SetMIC(ns.NwkSKey); err != nil {
