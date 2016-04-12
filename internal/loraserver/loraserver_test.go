@@ -7,6 +7,7 @@ import (
 
 	"github.com/brocaar/loraserver/models"
 	"github.com/brocaar/lorawan"
+	"github.com/brocaar/lorawan/band"
 	. "github.com/smartystreets/goconvey/convey"
 )
 
@@ -180,6 +181,39 @@ func TestHandleDataUpPackets(t *testing.T) {
 						Convey("Then the TXPayload queue is empty", func() {
 							_, _, err := getTXPayloadAndRemainingFromQueue(p, ns.DevEUI)
 							So(err, ShouldEqual, errDoesNotExist)
+						})
+					})
+
+					Convey("Given a node specific TX params", func() {
+						delay := uint8(3)
+						tx2Frequency := 868400000
+						ns.TXParams = models.TXParams{
+							Set:          true,
+							TXDelay1:     delay,
+							TX1DRoffset:  1,
+							TX2DataRate:  3,
+							TX2Frequency: tx2Frequency,
+						}
+						So(saveNodeSession(p, ns), ShouldBeNil)
+
+						rxPacket.RXInfo.DataRate = band.DataRateConfiguration[2]
+						Convey("When calling handleRXPacket", func() {
+							So(handleRXPacket(ctx, rxPacket), ShouldBeNil)
+
+							Convey("Then two tx packets are sent to the gateway with correct params", func() {
+								txPacket1 := <-gw.txPacketChan
+								txPacket2 := <-gw.txPacketChan
+
+								delayDuration1 := uint32(time.Duration(delay) * time.Second / time.Microsecond)
+								So(txPacket1.TXInfo.DataRate, ShouldResemble, band.DataRateConfiguration[1])
+								So(txPacket1.TXInfo.Frequency, ShouldEqual, rxPacket.RXInfo.Frequency)
+								So(txPacket1.TXInfo.Timestamp, ShouldEqual, rxPacket.RXInfo.Timestamp+delayDuration1)
+
+								delayDuration2 := uint32(time.Duration(delay+1) * time.Second / time.Microsecond)
+								So(txPacket2.TXInfo.DataRate, ShouldResemble, band.DataRateConfiguration[3])
+								So(txPacket2.TXInfo.Frequency, ShouldEqual, tx2Frequency)
+								So(txPacket2.TXInfo.Timestamp, ShouldEqual, rxPacket.RXInfo.Timestamp+delayDuration2)
+							})
 						})
 					})
 				})
@@ -526,6 +560,46 @@ func TestHandleJoinRequestPackets(t *testing.T) {
 					})
 				})
 			})
+		})
+	})
+}
+
+func TestDataRateOffset(t *testing.T) {
+	Convey("Given valid data rates and offsets", t, func() {
+		examples := []struct {
+			dataRate band.DataRate
+			offset   uint8
+			expected band.DataRate
+		}{
+			{band.DataRateConfiguration[0], 0, band.DataRateConfiguration[0]},
+			{band.DataRateConfiguration[2], 2, band.DataRateConfiguration[0]},
+			{band.DataRateConfiguration[4], 2, band.DataRateConfiguration[2]},
+			{band.DataRateConfiguration[5], 4, band.DataRateConfiguration[1]},
+		}
+
+		Convey("Then DataRate.Offset provides correct results", func() {
+			for _, example := range examples {
+				actual, err := dataRateOffset(example.dataRate, example.offset)
+				So(err, ShouldBeNil)
+				So(actual, ShouldResemble, example.expected)
+			}
+		})
+	})
+
+	Convey("Given invalid data rates or offsets", t, func() {
+		examples := []struct {
+			dataRate band.DataRate
+			offset   uint8
+		}{
+			{band.DataRate{}, 0},
+			{band.DataRateConfiguration[0], 1},
+		}
+
+		Convey("Then DataRate.Offset returns an error", func() {
+			for _, example := range examples {
+				_, err := dataRateOffset(example.dataRate, example.offset)
+				So(err, ShouldNotBeNil)
+			}
 		})
 	})
 }

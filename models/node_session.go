@@ -5,6 +5,16 @@ import (
 	"github.com/brocaar/lorawan/band"
 )
 
+// TXParams contains custom settings for sending data to a node (normally set
+// by mac commands).
+type TXParams struct {
+	TXDelay1     uint8
+	TX1DRoffset  uint8
+	TX2DataRate  uint8
+	TX2Frequency int
+	Set          bool
+}
+
 // NodeSession contains the informatio of a node-session (an activated node).
 type NodeSession struct {
 	DevAddr  lorawan.DevAddr   `db:"dev_addr" json:"devAddr"`
@@ -14,6 +24,7 @@ type NodeSession struct {
 	NwkSKey  lorawan.AES128Key `db:"nwk_s_key" json:"nwkSKey"`
 	FCntUp   uint32            `db:"fcnt_up" json:"fCntUp"`
 	FCntDown uint32            `db:"fcnt_down" json:"fCntDown"`
+	TXParams TXParams          `db:"tx_params" json:"txParams"`
 }
 
 // ValidateAndGetFullFCntUp validates if the given fCntUp is valid

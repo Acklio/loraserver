@@ -237,7 +237,6 @@ func handleDataDownReply(ctx Context, rxPacket models.RXPacket, rxPacketsCount u
 	}
 
 	macCommandsResponse, macCommandReplies, err := fromMacCommandSlice(macPL.FHDR.FOpts, uint8(rxPacketsCount), margin)
-
 	if err != nil {
 		return err
 	}
@@ -344,13 +343,26 @@ func send(frmPayload []lorawan.Payload, rxPacket models.RXPacket, ns models.Node
 		return fmt.Errorf("could not set MIC: %s", err)
 	}
 
+	receiveDelay1 := band.ReceiveDelay1
+	if ns.TXParams.TXDelay1 != 0 {
+		receiveDelay1 = time.Duration(ns.TXParams.TXDelay1) * time.Second
+	}
+
+	dataRate := rxPacket.RXInfo.DataRate
+	if ns.TXParams.Set {
+		var err error
+		if dataRate, err = dataRateOffset(dataRate, ns.TXParams.TX1DRoffset); err != nil {
+			return err
+		}
+	}
+
 	txPacket := models.TXPacket{
 		TXInfo: models.TXInfo{
 			MAC:       rxPacket.RXInfo.MAC,
-			Timestamp: rxPacket.RXInfo.Timestamp + uint32(band.ReceiveDelay1/time.Microsecond),
+			Timestamp: rxPacket.RXInfo.Timestamp + uint32(receiveDelay1/time.Microsecond),
 			Frequency: rxPacket.RXInfo.Frequency,
 			Power:     band.DefaultTXPower,
-			DataRate:  rxPacket.RXInfo.DataRate,
+			DataRate:  dataRate,
 			CodeRate:  rxPacket.RXInfo.CodeRate,
 		},
 		PHYPayload: phy,
@@ -361,10 +373,24 @@ func send(frmPayload []lorawan.Payload, rxPacket models.RXPacket, ns models.Node
 		return fmt.Errorf("sending TXPacket to the gateway failed: %s", err)
 	}
 
+	// specified in the lorawan specification
+	receiveDelay2 := receiveDelay1 + time.Second
+
 	// window 2
-	txPacket.TXInfo.Timestamp = rxPacket.RXInfo.Timestamp + uint32(band.ReceiveDelay2/time.Microsecond)
-	txPacket.TXInfo.Frequency = band.RX2Frequency
-	txPacket.TXInfo.DataRate = band.DataRateConfiguration[band.RX2DataRate]
+	if ns.TXParams.Set {
+		txPacket.TXInfo.Frequency = ns.TXParams.TX2Frequency
+		dataRateIndex := int(ns.TXParams.TX2DataRate)
+		if dataRateIndex < len(band.DataRateConfiguration) {
+			txPacket.TXInfo.DataRate = band.DataRateConfiguration[dataRateIndex]
+		} else {
+			return fmt.Errorf("Unknown data rate numeric value: %d", dataRate)
+		}
+	} else {
+		txPacket.TXInfo.Frequency = band.RX2Frequency
+		txPacket.TXInfo.DataRate = band.DataRateConfiguration[band.RX2DataRate]
+	}
+	txPacket.TXInfo.Timestamp = rxPacket.RXInfo.Timestamp + uint32(receiveDelay2/time.Microsecond)
+
 	if err := ctx.Gateway.Send(txPacket); err != nil {
 		return fmt.Errorf("sending TXPacket to the gateway failed: %s", err)
 	}
@@ -379,6 +405,26 @@ func send(frmPayload []lorawan.Payload, rxPacket models.RXPacket, ns models.Node
 	}
 
 	return nil
+}
+
+func dataRateOffset(dataRate band.DataRate, offset uint8) (band.DataRate, error) {
+	dataRateIndex := -1
+	for index, currentDataRate := range band.DataRateConfiguration {
+		if dataRate == currentDataRate {
+			dataRateIndex = index
+			break
+		}
+	}
+
+	return dataRateByIndex(dataRateIndex - int(offset))
+}
+
+func dataRateByIndex(index int) (band.DataRate, error) {
+	if index < 0 || index >= len(band.DataRateConfiguration) {
+		return band.DataRate{}, fmt.Errorf("Unknown data rate index: %d", index)
+	}
+
+	return band.DataRateConfiguration[index], nil
 }
 
 func validateAndCollectJoinRequestPacket(ctx Context, rxPacket models.RXPacket) error {
