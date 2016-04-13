@@ -184,32 +184,28 @@ func handleCollectedDataUpPackets(ctx Context, rxPackets RXPackets) error {
 		return fmt.Errorf("could not get node-session: %s", err)
 	}
 
-	if macPL.FPort != nil {
-		if *macPL.FPort == 0 {
-			log.Warn("todo: implement FPort == 0 packets")
-		} else {
-			var data []byte
+	if macPL.FPort != nil && *macPL.FPort > 0 {
+		var data []byte
 
-			// it is possible that the FRMPayload is empty, in this case only
-			// the FPort will be send
-			if len(macPL.FRMPayload) == 1 {
-				dataPL, ok := macPL.FRMPayload[0].(*lorawan.DataPayload)
-				if !ok {
-					return errors.New("FRMPayload must be of type *lorawan.DataPayload")
-				}
-				data = dataPL.Bytes
+		// it is possible that the FRMPayload is empty, in this case only
+		// the FPort will be send
+		if len(macPL.FRMPayload) == 1 {
+			dataPL, ok := macPL.FRMPayload[0].(*lorawan.DataPayload)
+			if !ok {
+				return errors.New("FRMPayload must be of type *lorawan.DataPayload")
 			}
+			data = dataPL.Bytes
+		}
 
-			err = ctx.Application.Send(ns.DevEUI, ns.AppEUI, models.RXPayload{
-				DevEUI:       ns.DevEUI,
-				GatewayCount: rxPacketsCount,
-				FPort:        *macPL.FPort,
-				RSSI:         rxPacket.RXInfo.RSSI,
-				Data:         data,
-			})
-			if err != nil {
-				return fmt.Errorf("could not send RXPacket to application: %s", err)
-			}
+		err = ctx.Application.Send(ns.DevEUI, ns.AppEUI, models.RXPayload{
+			DevEUI:       ns.DevEUI,
+			GatewayCount: rxPacketsCount,
+			FPort:        *macPL.FPort,
+			RSSI:         rxPacket.RXInfo.RSSI,
+			Data:         data,
+		})
+		if err != nil {
+			return fmt.Errorf("could not send RXPacket to application: %s", err)
 		}
 	}
 
@@ -219,34 +215,127 @@ func handleCollectedDataUpPackets(ctx Context, rxPackets RXPackets) error {
 		return fmt.Errorf("could not update node-session: %s", err)
 	}
 
+	frmPayload, err := handleMacCommands(macPL, ctx, ns, rxPacket.RXInfo.LoRaSNR, uint8(rxPacketsCount))
+	if err != nil {
+		return fmt.Errorf("Could not process mac commands: %s", err)
+	}
+
 	// handle downlink (ACK)
 	time.Sleep(CollectDataDownWait)
-	return handleDataDownReply(ctx, rxPacket, rxPacketsCount, ns)
+	return handleDataDownReply(ctx, rxPacket, frmPayload, ns)
 }
 
-func handleDataDownReply(ctx Context, rxPacket models.RXPacket, rxPacketsCount uint8, ns models.NodeSession) error {
+func updateNodeSession(ctx Context, ns models.NodeSession, macCommandsWithResponse *MacCommandsWithResponse) error {
+	if macCommandsWithResponse == nil {
+		return nil
+	}
+	if macCommandsWithResponse.Response.RXTimingSetup {
+		ns.TXParams.TXDelay1 = macCommandsWithResponse.MacCommands.RXTimingSetup.Delay
+		if err := saveNodeSession(ctx.RedisPool, ns); err != nil {
+			return fmt.Errorf("Could not update node session with TXDelay1: %s", err)
+		}
+	}
+
+	rx2Setup := macCommandsWithResponse.Response.RX2Setup
+	haveNewRX2Setup := rx2Setup != nil && rx2Setup.RX1DRoffsetACK && rx2Setup.RX2DataRateACK && rx2Setup.ChannelACK
+	if haveNewRX2Setup {
+		ns.TXParams.Set = true
+		ns.TXParams.TX2Frequency = macCommandsWithResponse.MacCommands.RX2Setup.Frequency * 100
+		ns.TXParams.TX1DRoffset = macCommandsWithResponse.MacCommands.RX2Setup.DLsettings.RX1DRoffset
+		ns.TXParams.TX2DataRate = macCommandsWithResponse.MacCommands.RX2Setup.DLsettings.RX2DataRate
+		if err := saveNodeSession(ctx.RedisPool, ns); err != nil {
+			return fmt.Errorf("Could not update node session with RX2Setup: %s", err)
+		}
+	}
+
+	return nil
+}
+
+func handleMACCommandLinkCheckReq(rxPacketsCount uint8, margin uint8) *lorawan.MACCommand {
+	return &lorawan.MACCommand{
+		CID: lorawan.LinkCheckAns,
+		Payload: &lorawan.LinkCheckAnsPayload{
+			Margin: margin,
+			GwCnt:  rxPacketsCount,
+		},
+	}
+}
+
+func handleMacCommands(macPL *lorawan.MACPayload, ctx Context, ns models.NodeSession, loraSNR float64, rxPacketsCount uint8) ([]lorawan.Payload, error) {
+	var macCommandsSlice []lorawan.MACCommand
+	if macPL.FPort != nil {
+		if *macPL.FPort == 0 {
+			for _, payload := range macPL.FRMPayload {
+				macCommand, ok := payload.(*lorawan.MACCommand)
+				if !ok {
+					return nil, fmt.Errorf("Unexpected payload in with FPort == 0: %s", payload)
+				}
+				macCommandsSlice = append(macCommandsSlice, *macCommand)
+			}
+		}
+	}
+	var margin uint8
+	if loraSNR > 0 {
+		// Maybe this is not the correct way to handle
+		margin = uint8(loraSNR)
+	}
+
+	macCommandsSlice = append(macCommandsSlice, macPL.FHDR.FOpts...)
+
+	macCommandsResponse, unparsedMacCommands, err := parseMacCommandsResponse(macCommandsSlice)
+	if err != nil {
+		return nil, err
+	}
+
+	if macCommandsResponse.nonEmpty {
+		if err = updateSentCommandResponse(ctx.RedisPool, ns.DevEUI, macCommandsResponse); err != nil {
+			return nil, err
+		}
+	}
+
+	macCommandsWithResponse, err := getLastMacCommandsWithResponse(ctx.RedisPool, ns.DevEUI)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = updateNodeSession(ctx, ns, macCommandsWithResponse); err != nil {
+		return nil, err
+	}
+
+	macCommands, err := getMacCommandsToBeSent(ctx.RedisPool, ns.DevEUI)
+	if err != nil && err != errDoesNotExist {
+		return nil, fmt.Errorf("Could not get MAC commands: %s", err)
+	}
+
+	var frmPayload []lorawan.Payload
+	if err != errDoesNotExist {
+		frmPayload = macCommands.Payloads()
+
+		if err = markMacCommandsAsSent(ctx.RedisPool, ns.DevEUI, macCommands); err != nil {
+			return nil, fmt.Errorf("Could not mark MAC commands as waiting response: %s", err)
+		}
+	}
+	for _, macCommand := range unparsedMacCommands {
+		if macCommand.CID == lorawan.LinkCheckReq {
+			frmPayload = append(frmPayload, handleMACCommandLinkCheckReq(rxPacketsCount, margin))
+		} else {
+			log.WithFields(log.Fields{
+				"macCommand": macCommand,
+			}).Warn("Unknown mac command received")
+		}
+	}
+
+	return frmPayload, nil
+}
+
+func handleDataDownReply(ctx Context, rxPacket models.RXPacket, frmPayload []lorawan.Payload, ns models.NodeSession) error {
 	macPL, ok := rxPacket.PHYPayload.MACPayload.(*lorawan.MACPayload)
 	if !ok {
 		return fmt.Errorf("expected *lorawan.MACPayload, got: %T", rxPacket.PHYPayload.MACPayload)
 	}
 
-	var margin uint8
-	if rxPacket.RXInfo.LoRaSNR > 0 {
-		// Maybe this is not the correct way to handle
-		margin = uint8(rxPacket.RXInfo.LoRaSNR)
-	}
-
-	macCommandsResponse, macCommandReplies, err := fromMacCommandSlice(macPL.FHDR.FOpts, uint8(rxPacketsCount), margin)
-	if err != nil {
-		return err
-	}
-
-	if macCommandsResponse.nonEmpty {
-		updateSentCommandResponse(ctx.RedisPool, ns.DevEUI, macCommandsResponse)
-	}
-
 	// the last payload was received by the node
-	if macPL.FHDR.FCtrl.ACK && !macCommandsResponse.nonEmpty {
+	if macPL.FHDR.FCtrl.ACK {
 		if err := clearInProcessTXPayload(ctx.RedisPool, ns.DevEUI); err != nil {
 			return fmt.Errorf("could not clear in-process TXPayload: %s", err)
 		}
@@ -256,25 +345,12 @@ func handleDataDownReply(ctx Context, rxPacket models.RXPacket, rxPacketsCount u
 		}
 	}
 
-	macCommands, err := getMacCommandsToBeSent(ctx.RedisPool, ns.DevEUI)
-	if err != nil && err != errDoesNotExist {
-		return fmt.Errorf("Could not get MAC commands: %s", err)
-	}
-
 	var remaining bool
 
-	var frmPayload []lorawan.Payload
 	var confirmed bool
 	var fPort uint8
-	if err != errDoesNotExist || macCommandReplies != nil {
-		frmPayload = macCommands.MacCommandSlice()
-		for _, reply := range macCommandReplies {
-			frmPayload = append(frmPayload, &reply)
-		}
-
-		if err = markMacCommandsAsSent(ctx.RedisPool, ns.DevEUI, macCommands); err != nil {
-			return fmt.Errorf("Could not mark MAC commands as waiting response: %s", err)
-		}
+	var err error
+	if frmPayload != nil {
 		confirmed = true
 		fPort = 0
 	} else {
@@ -297,7 +373,18 @@ func handleDataDownReply(ctx Context, rxPacket models.RXPacket, rxPacketsCount u
 		fPort = txPayload.FPort
 	}
 
-	if err = send(frmPayload, rxPacket, ns, ctx, remaining, confirmed, fPort); err != nil {
+	if frmPayload == nil {
+		return nil
+	}
+
+	// set ACK to true when received packet needs an ACK
+	ack := rxPacket.PHYPayload.MHDR.MType == lorawan.ConfirmedDataUp
+	macPLReply, err := createMACPayload(frmPayload, remaining, fPort, ns, ack)
+	if err != nil {
+		return fmt.Errorf("Error constructing MACPayload: %v", err)
+	}
+
+	if err = send(macPLReply, rxPacket, ns, ctx, confirmed); err != nil {
 		return err
 	}
 
@@ -311,32 +398,42 @@ func handleDataDownReply(ctx Context, rxPacket models.RXPacket, rxPacketsCount u
 	return nil
 }
 
-func send(frmPayload []lorawan.Payload, rxPacket models.RXPacket, ns models.NodeSession, ctx Context, remaining bool, confirmed bool, fPort uint8) error {
-	phy := lorawan.PHYPayload{
-		MHDR: lorawan.MHDR{
-			MType: lorawan.UnconfirmedDataDown,
-			Major: lorawan.LoRaWANR1,
-		},
-	}
+func createMACPayload(frmPayload []lorawan.Payload, remaining bool, fPort uint8, ns models.NodeSession, ack bool) (*lorawan.MACPayload, error) {
 	macPL := &lorawan.MACPayload{
 		FHDR: lorawan.FHDR{
 			DevAddr: ns.DevAddr,
 			FCtrl: lorawan.FCtrl{
 				FPending: remaining,
-				ACK:      rxPacket.PHYPayload.MHDR.MType == lorawan.ConfirmedDataUp, // set ACK to true when received packet needs an ACK
+				ACK:      ack,
 			},
 			FCnt: ns.FCntDown,
 		},
+		FPort:      &fPort,
+		FRMPayload: frmPayload,
 	}
-	phy.MACPayload = macPL
 
+	return macPL, nil
+}
+
+func send(macPL *lorawan.MACPayload, rxPacket models.RXPacket, ns models.NodeSession, ctx Context, confirmed bool) error {
+	phy := lorawan.PHYPayload{
+		MHDR: lorawan.MHDR{
+			MType: lorawan.UnconfirmedDataDown,
+			Major: lorawan.LoRaWANR1,
+		},
+		MACPayload: macPL,
+	}
 	if confirmed {
 		phy.MHDR.MType = lorawan.ConfirmedDataDown
 	}
-	macPL.FPort = &fPort
-	macPL.FRMPayload = frmPayload
-	if err := phy.EncryptFRMPayload(ns.AppSKey); err != nil {
-		return fmt.Errorf("could not encrypt FRMPayload: %s", err)
+	if macPL.FPort != nil && *macPL.FPort == 0 {
+		if err := phy.EncryptFRMPayload(ns.NwkSKey); err != nil {
+			return fmt.Errorf("could not encrypt FRMPayload(NwkSKey): %s", err)
+		}
+	} else {
+		if err := phy.EncryptFRMPayload(ns.AppSKey); err != nil {
+			return fmt.Errorf("could not encrypt FRMPayload: %s", err)
+		}
 	}
 
 	if err := phy.SetMIC(ns.NwkSKey); err != nil {

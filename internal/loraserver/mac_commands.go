@@ -5,7 +5,6 @@ import (
 	"encoding/gob"
 	"fmt"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/brocaar/lorawan"
 	"github.com/garyburd/redigo/redis"
 )
@@ -15,7 +14,8 @@ const (
 	macCommandsWithResponseTempl = "mac_cmds_last_with_response_%s"
 )
 
-//
+// MacCommands groups together the MAC commands that can be sent to an
+// end-device.
 type MacCommands struct {
 	DevEUI        lorawan.EUI64
 	LinkADR       lorawan.LinkADRReqPayload
@@ -26,6 +26,8 @@ type MacCommands struct {
 	RXTimingSetup lorawan.RXTimingSetupReqPayload
 }
 
+// MacCommandsResponse groups together the answers that an end-device can give
+// to MacCommands.
 type MacCommandsResponse struct {
 	LinkADR       *lorawan.LinkADRAnsPayload
 	DutyCycle     bool
@@ -36,17 +38,23 @@ type MacCommandsResponse struct {
 	nonEmpty      bool
 }
 
+// MacCommandsWithResponse groups together a MacCommands (request towards an
+// end-device) and MacCommandsResponse (answer to the request).
 type MacCommandsWithResponse struct {
 	MacCommands MacCommands
 	Response    MacCommandsResponse
 }
 
+// NextAndLastMacCommands groups together the next MacCommands to be sent to an
+// end device and the last sent one with its reply (next and last might contain
+// the same macCommands if there is still no answer).
 type NextAndLastMacCommands struct {
 	Next *MacCommands
 	Last *MacCommandsWithResponse
 }
 
-func (m *MacCommands) MacCommandSlice() []lorawan.Payload {
+// Payloads converts the MacCommands into a slice of Payloads.
+func (m *MacCommands) Payloads() []lorawan.Payload {
 	var macCommands []lorawan.Payload
 	if m.LinkADR != (lorawan.LinkADRReqPayload{}) {
 		macCommands = append(macCommands, &lorawan.MACCommand{
@@ -83,16 +91,6 @@ func (m *MacCommands) MacCommandSlice() []lorawan.Payload {
 	}
 
 	return macCommands
-}
-
-func handleMACCommandLinkCheckReq(rxPacketsCount uint8, margin uint8) lorawan.MACCommand {
-	return lorawan.MACCommand{
-		CID: lorawan.LinkCheckAns,
-		Payload: &lorawan.LinkCheckAnsPayload{
-			Margin: margin,
-			GwCnt:  rxPacketsCount,
-		},
-	}
 }
 
 func extractLinkADRAns(payload lorawan.MACCommandPayload) (*lorawan.LinkADRAnsPayload, error) {
@@ -135,16 +133,14 @@ func extractNewChannelAns(payload lorawan.MACCommandPayload) (*lorawan.NewChanne
 	return newChannelAnsPayload, nil
 }
 
-// Convert a slice of lorawanMACCommand to a MacCommandsResponse and possibly a reply for LinkCheckReq
-func fromMacCommandSlice(macCommands []lorawan.MACCommand, rxPacketsCount uint8, margin uint8) (MacCommandsResponse, []lorawan.MACCommand, error) {
+// Convert a slice of lorawan.MACCommand to a MacCommandsResponse and possibly unparsed mac commands
+func parseMacCommandsResponse(macCommands []lorawan.MACCommand) (MacCommandsResponse, []lorawan.MACCommand, error) {
 
-	var repliesToSent []lorawan.MACCommand
+	var unparsed []lorawan.MACCommand
 	var macCommandsResponse = MacCommandsResponse{}
 	var err error
 	for _, macCommand := range macCommands {
 		switch macCommand.CID {
-		case lorawan.LinkCheckReq:
-			repliesToSent = append(repliesToSent, handleMACCommandLinkCheckReq(rxPacketsCount, margin))
 		case lorawan.DutyCycleAns:
 			macCommandsResponse.DutyCycle = true
 			macCommandsResponse.nonEmpty = true
@@ -172,11 +168,11 @@ func fromMacCommandSlice(macCommands []lorawan.MACCommand, rxPacketsCount uint8,
 			}
 			macCommandsResponse.nonEmpty = true
 		default:
-			log.Warn("MAC Command %d not implemented", macCommand.CID)
+			unparsed = append(unparsed, macCommand)
 		}
 	}
 
-	return macCommandsResponse, repliesToSent, nil
+	return macCommandsResponse, unparsed, nil
 }
 
 func markMacCommandsAsSent(p *redis.Pool, devEUI lorawan.EUI64, macCommands MacCommands) error {
@@ -252,9 +248,13 @@ func getMacCommandsToBeSent(p *redis.Pool, devEUI lorawan.EUI64) (MacCommands, e
 
 	c := p.Get()
 	defer c.Close()
-	key := fmt.Sprintf(macCommandsKeyTempl, devEUI)
+	keyMacCommandsToBeSent := fmt.Sprintf(macCommandsKeyTempl, devEUI)
+	keyLastMacCommands := fmt.Sprintf(macCommandsWithResponseTempl, devEUI)
 
-	b, err := redis.Bytes(c.Do("GET", key))
+	c.Send("GET", keyMacCommandsToBeSent)
+	c.Send("GET", keyLastMacCommands)
+	c.Flush()
+	b, err := redis.Bytes(c.Receive())
 	if err != nil && err != redis.ErrNil {
 		return macCommands, err
 	}
@@ -264,8 +264,26 @@ func getMacCommandsToBeSent(p *redis.Pool, devEUI lorawan.EUI64) (MacCommands, e
 
 	macCommands.DevEUI = devEUI
 	err = gob.NewDecoder(bytes.NewReader(b)).Decode(&macCommands)
+	if err != nil {
+		return macCommands, err
+	}
 
-	return macCommands, err
+	// Check that the mac commands are not already answered.
+	b, err = redis.Bytes(c.Receive())
+	if err == nil {
+		var macCommandsWithResponse MacCommandsWithResponse
+		if err = gob.NewDecoder(bytes.NewReader(b)).Decode(&macCommandsWithResponse); err != nil {
+			return macCommands, err
+		}
+		emptyResponse := MacCommandsResponse{}
+		hasUnansweredMacCommands := (macCommands != macCommandsWithResponse.MacCommands ||
+			macCommandsWithResponse.Response == emptyResponse)
+		if !hasUnansweredMacCommands {
+			return macCommands, errDoesNotExist
+		}
+	}
+
+	return macCommands, nil
 }
 
 func getNextAndLastMacCommands(p *redis.Pool, devEUI lorawan.EUI64) (NextAndLastMacCommands, error) {
@@ -296,25 +314,27 @@ func updateMacCommandsToBeSent(p *redis.Pool, data MacCommands) (lorawan.EUI64, 
 	return data.DevEUI, nil
 }
 
-//
+// NodeMacCommandsAPI exports the MacCommands related functions.
 type NodeMacCommandsAPI struct {
 	ctx Context
 }
 
-//
+// NewNodeMacCommandsAPI crestes a new NodeMacCommandsAPI.
 func NewNodeMacCommandsAPI(ctx Context) *NodeMacCommandsAPI {
 	return &NodeMacCommandsAPI{
 		ctx: ctx,
 	}
 }
 
-//
+// GetMacCmdsToBeSent gets the next to be sent and last sent MacCommands.
+// The latter has also an response that might or might not be nil.
 func (a *NodeMacCommandsAPI) GetMacCmdsToBeSent(devEUI lorawan.EUI64, macCommands *NextAndLastMacCommands) error {
 	var err error
 	*macCommands, err = getNextAndLastMacCommands(a.ctx.RedisPool, devEUI)
 	return err
 }
 
+// Update updates the value of the next MacCommands to be sent.
 func (a *NodeMacCommandsAPI) Update(data MacCommands, devEUI *lorawan.EUI64) error {
 	var err error
 	*devEUI, err = updateMacCommandsToBeSent(a.ctx.RedisPool, data)

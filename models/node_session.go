@@ -11,7 +11,7 @@ type TXParams struct {
 	TXDelay1     uint8
 	TX1DRoffset  uint8
 	TX2DataRate  uint8
-	TX2Frequency int
+	TX2Frequency uint32
 	Set          bool
 }
 

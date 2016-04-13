@@ -165,7 +165,7 @@ func TestHandleDataUpPackets(t *testing.T) {
 								So(*macPL.FPort, ShouldEqual, 5)
 
 								So(txPacket1.PHYPayload.DecryptFRMPayload(ns.AppSKey), ShouldBeNil)
-								So(len(macPL.FRMPayload), ShouldEqual, 1)
+								So(macPL.FRMPayload, ShouldHaveLength, 1)
 								pl, ok := macPL.FRMPayload[0].(*lorawan.DataPayload)
 								So(ok, ShouldBeTrue)
 								So(pl.Bytes, ShouldResemble, []byte("hello back!"))
@@ -186,7 +186,7 @@ func TestHandleDataUpPackets(t *testing.T) {
 
 					Convey("Given a node specific TX params", func() {
 						delay := uint8(3)
-						tx2Frequency := 868400000
+						tx2Frequency := uint32(868400000)
 						ns.TXParams = models.TXParams{
 							Set:          true,
 							TXDelay1:     delay,
@@ -306,16 +306,27 @@ func TestHandleDataUpPackets(t *testing.T) {
 					})
 				})
 
-				var maxDCCycle uint8 = 4
+				var delay uint8 = 4
+				frequency := uint32(86850000)
+				rx2DataRate := uint8(2)
+				rx1DRoffset := uint8(1)
 				macCommands := MacCommands{
 					DevEUI:    ns.DevEUI,
 					DevStatus: true,
-					DutyCycle: lorawan.DutyCycleReqPayload{
-						MaxDCCycle: maxDCCycle,
+					RXTimingSetup: lorawan.RXTimingSetupReqPayload{
+						Delay: delay,
+					},
+					RX2Setup: lorawan.RX2SetupReqPayload{
+						Frequency: frequency / 100,
+						DLsettings: lorawan.DLsettings{
+							RX1DRoffset: rx1DRoffset,
+							RX2DataRate: rx2DataRate,
+						},
 					},
 				}
 				Convey("Given pending MacCommands", func() {
-					updateMacCommandsToBeSent(p, macCommands)
+					_, err := updateMacCommandsToBeSent(p, macCommands)
+					So(err, ShouldBeNil)
 
 					Convey("When calling handleRXPacket", func() {
 						So(handleRXPacket(ctx, rxPacket), ShouldBeNil)
@@ -325,27 +336,40 @@ func TestHandleDataUpPackets(t *testing.T) {
 						})
 
 						Convey("Then two identical packets are sent to the gateway (two receive windows)", func() {
+							So(gw.txPacketChan, ShouldHaveLength, 2)
+
 							txPacket1 := <-gw.txPacketChan
 							txPacket2 := <-gw.txPacketChan
 							So(txPacket1.PHYPayload, ShouldResemble, txPacket2.PHYPayload)
 
-							So(txPacket1.PHYPayload.DecryptFRMPayload(ns.AppSKey), ShouldBeNil)
-							macPL, ok := txPacket1.PHYPayload.MACPayload.(*lorawan.MACPayload)
-							So(ok, ShouldBeTrue)
-
 							Convey("Then these packets contain the expected values", func() {
 								So(txPacket1.PHYPayload.MHDR.MType, ShouldEqual, lorawan.ConfirmedDataDown)
+								So(txPacket1.PHYPayload.DecryptFRMPayload(ns.NwkSKey), ShouldBeNil)
+
+								macPL, ok := txPacket1.PHYPayload.MACPayload.(*lorawan.MACPayload)
+								So(ok, ShouldBeTrue)
+
 								So(macPL.FHDR.FCnt, ShouldEqual, ns.FCntDown)
 								So(*macPL.FPort, ShouldEqual, 0)
-								So(len(macPL.FRMPayload), ShouldEqual, 2)
+								So(macPL.FRMPayload, ShouldHaveLength, 3)
 
 								for _, macCommandRaw := range macPL.FRMPayload {
 									macCommand, ok := macCommandRaw.(*lorawan.MACCommand)
 									So(ok, ShouldBeTrue)
-									if macCommand.CID == lorawan.DutyCycleReq {
-										So(macCommand.Payload, ShouldResemble, &lorawan.DutyCycleReqPayload{
-											MaxDCCycle: maxDCCycle,
+									if macCommand.CID == lorawan.RXTimingSetupReq {
+										So(macCommand.Payload, ShouldResemble, &lorawan.RXTimingSetupReqPayload{
+											Delay: delay,
 										})
+									}
+									if macCommand.CID == lorawan.RXParamSetupReq {
+										expectedRXParamSetup := lorawan.RX2SetupReqPayload{
+											Frequency: frequency / 100,
+											DLsettings: lorawan.DLsettings{
+												RX1DRoffset: rx1DRoffset,
+												RX2DataRate: rx2DataRate,
+											},
+										}
+										So(macCommand.Payload, ShouldResemble, &expectedRXParamSetup)
 									}
 								}
 							})
@@ -366,41 +390,147 @@ func TestHandleDataUpPackets(t *testing.T) {
 					macCommandsWithResponse := &MacCommandsWithResponse{
 						MacCommands: macCommands,
 					}
+					_, err := updateMacCommandsToBeSent(p, macCommands)
+					So(err, ShouldBeNil)
 					So(saveInRedisMacCommandsWithResponce(p, macCommandsWithResponse), ShouldBeNil)
 
-					Convey("Given a packet with mac commands replies", func() {
+					Convey("Given a packet with mac commands responses", func() {
 						devStatus := lorawan.DevStatusAnsPayload{
 							Battery: 5,
 							Margin:  1,
 						}
+						rx2Setup := lorawan.RX2SetupAnsPayload{
+							RX1DRoffsetACK: true,
+							RX2DataRateACK: true,
+							ChannelACK:     true,
+						}
+
 						responses := []lorawan.MACCommand{
 							lorawan.MACCommand{
 								CID:     lorawan.DevStatusAns,
 								Payload: &devStatus,
 							},
+							lorawan.MACCommand{
+								CID: lorawan.RXTimingSetupAns,
+							},
+							lorawan.MACCommand{
+								CID:     lorawan.RXParamSetupAns,
+								Payload: &rx2Setup,
+							},
 						}
 
-						macPL := phy.MACPayload.(*lorawan.MACPayload)
-						macPL.FHDR.FOpts = responses
-						So(phy.SetMIC(ns.NwkSKey), ShouldBeNil)
-						rxPacket := models.RXPacket{
-							PHYPayload: phy,
+						macCommandsResponsesHandling := func(rxPacket models.RXPacket) func() {
+							return func() {
+								So(handleRXPacket(ctx, rxPacket), ShouldBeNil)
+
+								Convey("Then the mac commands replies are updated", func() {
+									data, err := getLastMacCommandsWithResponse(p, ns.DevEUI)
+									So(err, ShouldBeNil)
+									expectedMacCommandsWithResponse := MacCommandsWithResponse{
+										MacCommands: macCommands,
+										Response: MacCommandsResponse{
+											DevStatus:     &devStatus,
+											RXTimingSetup: true,
+											RX2Setup:      &rx2Setup,
+										},
+									}
+									So(*data, ShouldResemble, expectedMacCommandsWithResponse)
+								})
+
+								Convey("Then node session is updated", func() {
+									newNS, err := getNodeSession(ctx.RedisPool, ns.DevAddr)
+									So(err, ShouldBeNil)
+									So(newNS.TXParams.TXDelay1, ShouldEqual, delay)
+
+									So(newNS.TXParams.TX1DRoffset, ShouldEqual, rx1DRoffset)
+									So(newNS.TXParams.TX2Frequency, ShouldEqual, frequency)
+									So(newNS.TXParams.TX2DataRate, ShouldEqual, rx2DataRate)
+								})
+							}
 						}
 
-						Convey("When calling handleRXPacket", func() {
-							So(handleRXPacket(ctx, rxPacket), ShouldBeNil)
+						macPL, ok := phy.MACPayload.(*lorawan.MACPayload)
+						So(ok, ShouldBeTrue)
 
-							Convey("Then the mac commands replies are updated", func() {
-								data, err := getLastMacCommandsWithResponse(p, ns.DevEUI)
-								So(err, ShouldBeNil)
-								expectedMacCommandsWithResponse := MacCommandsWithResponse{
-									MacCommands: macCommands,
-									Response: MacCommandsResponse{
-										DevStatus: &devStatus,
-									},
-								}
-								So(*data, ShouldResemble, expectedMacCommandsWithResponse)
-							})
+						Convey("Given the mac command responses are in FOpts", func() {
+							macPL.FHDR.FOpts = responses
+							rxPacket.PHYPayload.MACPayload = macPL
+							So(rxPacket.PHYPayload.SetMIC(ns.NwkSKey), ShouldBeNil)
+
+							Convey("When calling handleRXPacket", macCommandsResponsesHandling(rxPacket))
+						})
+
+						Convey("Given the mac command responses are in FRMPayload", func() {
+							fPort := uint8(0)
+							macPL.FPort = &fPort
+							macPL.FRMPayload = nil
+							for _, data := range responses {
+								macCommand := data
+								macPL.FRMPayload = append(macPL.FRMPayload, &macCommand)
+							}
+							rxPacket.PHYPayload.MACPayload = macPL
+							So(rxPacket.PHYPayload.EncryptFRMPayload(ns.NwkSKey), ShouldBeNil)
+							So(rxPacket.PHYPayload.SetMIC(ns.NwkSKey), ShouldBeNil)
+
+							Convey("When calling handleRXPacket", macCommandsResponsesHandling(rxPacket))
+						})
+					})
+				})
+			})
+
+			Convey("Given LinkcCheckReq received", func() {
+				macPL := lorawan.MACPayload{
+					FHDR: lorawan.FHDR{
+						DevAddr: ns.DevAddr,
+						FCnt:    10,
+					},
+				}
+				macPL.FRMPayload = nil
+				macPL.FHDR.FOpts = []lorawan.MACCommand{
+					lorawan.MACCommand{
+						CID: lorawan.LinkCheckReq,
+					},
+				}
+				phy := lorawan.PHYPayload{
+					MACPayload: &macPL,
+					MHDR: lorawan.MHDR{
+						MType: lorawan.ConfirmedDataUp,
+						Major: lorawan.LoRaWANR1,
+					},
+				}
+				So(phy.SetMIC(ns.NwkSKey), ShouldBeNil)
+				margin := 3.0
+				rxPacket := models.RXPacket{
+					PHYPayload: phy,
+					RXInfo: models.RXInfo{
+						LoRaSNR: margin,
+					},
+				}
+
+				Convey("When calling handleRXPacket", func() {
+					So(handleRXPacket(ctx, rxPacket), ShouldBeNil)
+
+					Convey("Then LinkCheckAns should be sent", func() {
+						So(gw.txPacketChan, ShouldHaveLength, 2)
+						txPacket1 := <-gw.txPacketChan
+						txPacket2 := <-gw.txPacketChan
+						So(txPacket1.PHYPayload, ShouldResemble, txPacket2.PHYPayload)
+
+						So(txPacket1.PHYPayload.DecryptFRMPayload(ns.NwkSKey), ShouldBeNil)
+						macPL, ok := txPacket1.PHYPayload.MACPayload.(*lorawan.MACPayload)
+						So(*macPL.FPort, ShouldEqual, 0)
+						So(ok, ShouldBeTrue)
+						Convey("Then it should have the expected value", func() {
+
+							frmPayload := macPL.FRMPayload
+							So(frmPayload, ShouldHaveLength, 1)
+							linkCheckAns, ok := frmPayload[0].(*lorawan.MACCommand)
+							So(ok, ShouldBeTrue)
+
+							payload, ok := linkCheckAns.Payload.(*lorawan.LinkCheckAnsPayload)
+							So(ok, ShouldBeTrue)
+							So(payload.GwCnt, ShouldEqual, 1)
+							So(payload.Margin, ShouldEqual, uint8(margin))
 						})
 					})
 				})

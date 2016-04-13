@@ -8,13 +8,13 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-func TestMacCommandsToSlice(t *testing.T) {
+func TestMacCommandsPayloads(t *testing.T) {
 	Convey("Given a MacCommands", t, func() {
 		macCommands := MacCommands{}
 
 		Convey("When it is empty", func() {
 			Convey("When converting to slice", func() {
-				payloads := macCommands.MacCommandSlice()
+				payloads := macCommands.Payloads()
 				So(payloads, ShouldBeNil)
 			})
 		})
@@ -32,7 +32,7 @@ func TestMacCommandsToSlice(t *testing.T) {
 		Convey("When it has LinkADR", func() {
 			macCommands.LinkADR = linkADRPayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.MacCommandSlice()
+				payloads := macCommands.Payloads()
 				So(payloads, ShouldHaveLength, 1)
 				expectedPayload := &lorawan.MACCommand{
 					Payload: &linkADRPayload,
@@ -49,7 +49,7 @@ func TestMacCommandsToSlice(t *testing.T) {
 		Convey("When it has DutyCycle", func() {
 			macCommands.DutyCycle = dutyCyclePayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.MacCommandSlice()
+				payloads := macCommands.Payloads()
 				So(payloads, ShouldHaveLength, 1)
 				expectedPayload := &lorawan.MACCommand{
 					Payload: &dutyCyclePayload,
@@ -70,7 +70,7 @@ func TestMacCommandsToSlice(t *testing.T) {
 		Convey("When it has RX2Setup", func() {
 			macCommands.RX2Setup = rx2SetupPayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.MacCommandSlice()
+				payloads := macCommands.Payloads()
 				So(payloads, ShouldHaveLength, 1)
 				expectedPayload := &lorawan.MACCommand{
 					Payload: &rx2SetupPayload,
@@ -85,7 +85,7 @@ func TestMacCommandsToSlice(t *testing.T) {
 		Convey("When it has DevStatus", func() {
 			macCommands.DevStatus = devStatus
 			Convey("When converting to slice", func() {
-				payloads := macCommands.MacCommandSlice()
+				payloads := macCommands.Payloads()
 				So(payloads, ShouldHaveLength, 1)
 				expectedPayload := &lorawan.MACCommand{
 					CID: lorawan.DevStatusReq,
@@ -104,7 +104,7 @@ func TestMacCommandsToSlice(t *testing.T) {
 		Convey("When it has NewChannel", func() {
 			macCommands.NewChannel = newChannelPayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.MacCommandSlice()
+				payloads := macCommands.Payloads()
 				So(payloads, ShouldHaveLength, 1)
 				expectedPayload := &lorawan.MACCommand{
 					Payload: &newChannelPayload,
@@ -121,7 +121,7 @@ func TestMacCommandsToSlice(t *testing.T) {
 		Convey("When it has RXTimingSetup", func() {
 			macCommands.RXTimingSetup = rxTimingSetupPayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.MacCommandSlice()
+				payloads := macCommands.Payloads()
 				So(payloads, ShouldHaveLength, 1)
 				expectedPayload := &lorawan.MACCommand{
 					Payload: &rxTimingSetupPayload,
@@ -139,7 +139,7 @@ func TestMacCommandsToSlice(t *testing.T) {
 			macCommands.NewChannel = newChannelPayload
 			macCommands.RXTimingSetup = rxTimingSetupPayload
 
-			payloads := macCommands.MacCommandSlice()
+			payloads := macCommands.Payloads()
 
 			Convey("Then it has the appropriate length", func() {
 				So(payloads, ShouldHaveLength, 6)
@@ -164,6 +164,9 @@ func TestMacCommandsSaving(t *testing.T) {
 
 		macCommands := MacCommands{
 			DevEUI: devEUI,
+			DutyCycle: lorawan.DutyCycleReqPayload{
+				MaxDCCycle: 2,
+			},
 		}
 		macCommandsWithResponse := MacCommandsWithResponse{
 			MacCommands: macCommands,
@@ -194,6 +197,18 @@ func TestMacCommandsSaving(t *testing.T) {
 					data, err := getLastMacCommandsWithResponse(p, devEUI)
 					So(err, ShouldBeNil)
 					So(*data, ShouldResemble, macCommandsWithResponse)
+				})
+
+				Convey("Given it has response", func() {
+					macCommandsResponse := MacCommandsResponse{
+						DutyCycle: true,
+					}
+					So(updateSentCommandResponse(p, devEUI, macCommandsResponse), ShouldBeNil)
+
+					Convey("Then there should be no mac commands to be sent", func() {
+						_, err := getMacCommandsToBeSent(p, devEUI)
+						So(err, ShouldEqual, errDoesNotExist)
+					})
 				})
 			})
 
@@ -259,13 +274,13 @@ func TestMacCommandsSaving(t *testing.T) {
 
 func TestFromMacCommandsSlice(t *testing.T) {
 	Convey("Given an empty response slice", t, func() {
-		var responseSlice []lorawan.MACCommand = nil
+		var responseSlice []lorawan.MACCommand
 		Convey("When converted to MacCommandsResponse", func() {
-			response, linkCheckReply, err := fromMacCommandSlice(responseSlice, 1, 0)
+			response, unparsedMacCommands, err := parseMacCommandsResponse(responseSlice)
 			So(err, ShouldBeNil)
 
-			Convey("Then linkCheckReply should be absent", func() {
-				So(linkCheckReply, ShouldBeNil)
+			Convey("Then there should be no unparsed commands", func() {
+				So(unparsedMacCommands, ShouldBeNil)
 			})
 
 			Convey("Then response has zero-value", func() {
@@ -297,10 +312,11 @@ func TestFromMacCommandsSlice(t *testing.T) {
 			DataRateRangeOK:    true,
 		}
 
+		linkCheckReq := lorawan.MACCommand{
+			CID: lorawan.LinkCheckReq,
+		}
 		responseSlice := []lorawan.MACCommand{
-			lorawan.MACCommand{
-				CID: lorawan.LinkCheckReq,
-			},
+			linkCheckReq,
 			lorawan.MACCommand{
 				CID:     lorawan.LinkADRAns,
 				Payload: &linkADR,
@@ -326,7 +342,7 @@ func TestFromMacCommandsSlice(t *testing.T) {
 		}
 
 		Convey("Then all the relevant data is extracted", func() {
-			response, linkCheckReply, err := fromMacCommandSlice(responseSlice, 1, 2)
+			response, unparsedMacCommands, err := parseMacCommandsResponse(responseSlice)
 			So(err, ShouldBeNil)
 
 			So(*response.LinkADR, ShouldResemble, linkADR)
@@ -335,17 +351,9 @@ func TestFromMacCommandsSlice(t *testing.T) {
 			So(*response.DevStatus, ShouldResemble, devStatus)
 			So(*response.NewChannel, ShouldResemble, newChannel)
 			So(response.RXTimingSetup, ShouldBeTrue)
+			So(unparsedMacCommands, ShouldHaveLength, 1)
 
-			expectedLinkCheckReply := []lorawan.MACCommand{
-				lorawan.MACCommand{
-					CID: lorawan.LinkCheckAns,
-					Payload: &lorawan.LinkCheckAnsPayload{
-						Margin: 2,
-						GwCnt:  1,
-					},
-				},
-			}
-			So(linkCheckReply, ShouldResemble, expectedLinkCheckReply)
+			So(unparsedMacCommands[0], ShouldResemble, linkCheckReq)
 		})
 	})
 }
