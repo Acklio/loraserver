@@ -323,6 +323,7 @@ func TestHandleDataUpPackets(t *testing.T) {
 							RX2DataRate: rx2DataRate,
 						},
 					},
+					RequestEncryption: true,
 				}
 				Convey("Given pending MacCommands", func() {
 					_, err := updateMacCommandsToBeSent(p, macCommands)
@@ -518,13 +519,13 @@ func TestHandleDataUpPackets(t *testing.T) {
 
 						So(txPacket1.PHYPayload.DecryptFRMPayload(ns.NwkSKey), ShouldBeNil)
 						macPL, ok := txPacket1.PHYPayload.MACPayload.(*lorawan.MACPayload)
-						So(*macPL.FPort, ShouldEqual, 0)
 						So(ok, ShouldBeTrue)
 						Convey("Then it should have the expected value", func() {
+							So(macPL.FPort, ShouldBeNil)
 
-							frmPayload := macPL.FRMPayload
-							So(frmPayload, ShouldHaveLength, 1)
-							linkCheckAns, ok := frmPayload[0].(*lorawan.MACCommand)
+							macResponses := macPL.FHDR.FOpts
+							So(macResponses, ShouldHaveLength, 1)
+							linkCheckAns := macResponses[0]
 							So(ok, ShouldBeTrue)
 
 							payload, ok := linkCheckAns.Payload.(*lorawan.LinkCheckAnsPayload)

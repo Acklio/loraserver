@@ -17,13 +17,14 @@ const (
 // MacCommands groups together the MAC commands that can be sent to an
 // end-device.
 type MacCommands struct {
-	DevEUI        lorawan.EUI64
-	LinkADR       lorawan.LinkADRReqPayload
-	DutyCycle     lorawan.DutyCycleReqPayload
-	RX2Setup      lorawan.RX2SetupReqPayload
-	DevStatus     bool
-	NewChannel    lorawan.NewChannelReqPayload
-	RXTimingSetup lorawan.RXTimingSetupReqPayload
+	DevEUI            lorawan.EUI64
+	LinkADR           lorawan.LinkADRReqPayload
+	DutyCycle         lorawan.DutyCycleReqPayload
+	RX2Setup          lorawan.RX2SetupReqPayload
+	DevStatus         bool
+	NewChannel        lorawan.NewChannelReqPayload
+	RXTimingSetup     lorawan.RXTimingSetupReqPayload
+	RequestEncryption bool
 }
 
 // MacCommandsResponse groups together the answers that an end-device can give
@@ -53,38 +54,38 @@ type NextAndLastMacCommands struct {
 	Last *MacCommandsWithResponse
 }
 
-// Payloads converts the MacCommands into a slice of Payloads.
-func (m *MacCommands) Payloads() []lorawan.Payload {
-	var macCommands []lorawan.Payload
+// ToMACCommands converts the MacCommands into a slice of lorawan.MACCommand.
+func (m *MacCommands) ToMACCommands() []lorawan.MACCommand {
+	var macCommands []lorawan.MACCommand
 	if m.LinkADR != (lorawan.LinkADRReqPayload{}) {
-		macCommands = append(macCommands, &lorawan.MACCommand{
+		macCommands = append(macCommands, lorawan.MACCommand{
 			CID:     lorawan.LinkADRReq,
 			Payload: &m.LinkADR,
 		})
 	}
 	if m.DutyCycle != (lorawan.DutyCycleReqPayload{}) {
-		macCommands = append(macCommands, &lorawan.MACCommand{
+		macCommands = append(macCommands, lorawan.MACCommand{
 			CID:     lorawan.DutyCycleReq,
 			Payload: &m.DutyCycle,
 		})
 	}
 	if m.RX2Setup != (lorawan.RX2SetupReqPayload{}) {
-		macCommands = append(macCommands, &lorawan.MACCommand{
+		macCommands = append(macCommands, lorawan.MACCommand{
 			CID:     lorawan.RXParamSetupReq,
 			Payload: &m.RX2Setup,
 		})
 	}
 	if m.DevStatus {
-		macCommands = append(macCommands, &lorawan.MACCommand{CID: lorawan.DevStatusReq})
+		macCommands = append(macCommands, lorawan.MACCommand{CID: lorawan.DevStatusReq})
 	}
 	if m.NewChannel != (lorawan.NewChannelReqPayload{}) {
-		macCommands = append(macCommands, &lorawan.MACCommand{
+		macCommands = append(macCommands, lorawan.MACCommand{
 			CID:     lorawan.NewChannelReq,
 			Payload: &m.NewChannel,
 		})
 	}
 	if m.RXTimingSetup != (lorawan.RXTimingSetupReqPayload{}) {
-		macCommands = append(macCommands, &lorawan.MACCommand{
+		macCommands = append(macCommands, lorawan.MACCommand{
 			CID:     lorawan.RXTimingSetupReq,
 			Payload: &m.RXTimingSetup,
 		})

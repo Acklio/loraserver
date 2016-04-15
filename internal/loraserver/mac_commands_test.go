@@ -8,13 +8,13 @@ import (
 	. "github.com/smartystreets/goconvey/convey"
 )
 
-func TestMacCommandsPayloads(t *testing.T) {
+func TestMacCommandsToMACCommands(t *testing.T) {
 	Convey("Given a MacCommands", t, func() {
 		macCommands := MacCommands{}
 
 		Convey("When it is empty", func() {
 			Convey("When converting to slice", func() {
-				payloads := macCommands.Payloads()
+				payloads := macCommands.ToMACCommands()
 				So(payloads, ShouldBeNil)
 			})
 		})
@@ -32,9 +32,9 @@ func TestMacCommandsPayloads(t *testing.T) {
 		Convey("When it has LinkADR", func() {
 			macCommands.LinkADR = linkADRPayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.Payloads()
+				payloads := macCommands.ToMACCommands()
 				So(payloads, ShouldHaveLength, 1)
-				expectedPayload := &lorawan.MACCommand{
+				expectedPayload := lorawan.MACCommand{
 					Payload: &linkADRPayload,
 					CID:     lorawan.LinkADRReq,
 				}
@@ -49,9 +49,9 @@ func TestMacCommandsPayloads(t *testing.T) {
 		Convey("When it has DutyCycle", func() {
 			macCommands.DutyCycle = dutyCyclePayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.Payloads()
+				payloads := macCommands.ToMACCommands()
 				So(payloads, ShouldHaveLength, 1)
-				expectedPayload := &lorawan.MACCommand{
+				expectedPayload := lorawan.MACCommand{
 					Payload: &dutyCyclePayload,
 					CID:     lorawan.DutyCycleReq,
 				}
@@ -70,9 +70,9 @@ func TestMacCommandsPayloads(t *testing.T) {
 		Convey("When it has RX2Setup", func() {
 			macCommands.RX2Setup = rx2SetupPayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.Payloads()
+				payloads := macCommands.ToMACCommands()
 				So(payloads, ShouldHaveLength, 1)
-				expectedPayload := &lorawan.MACCommand{
+				expectedPayload := lorawan.MACCommand{
 					Payload: &rx2SetupPayload,
 					CID:     lorawan.RXParamSetupReq,
 				}
@@ -85,9 +85,9 @@ func TestMacCommandsPayloads(t *testing.T) {
 		Convey("When it has DevStatus", func() {
 			macCommands.DevStatus = devStatus
 			Convey("When converting to slice", func() {
-				payloads := macCommands.Payloads()
+				payloads := macCommands.ToMACCommands()
 				So(payloads, ShouldHaveLength, 1)
-				expectedPayload := &lorawan.MACCommand{
+				expectedPayload := lorawan.MACCommand{
 					CID: lorawan.DevStatusReq,
 				}
 				So(payloads[0], ShouldResemble, expectedPayload)
@@ -104,9 +104,9 @@ func TestMacCommandsPayloads(t *testing.T) {
 		Convey("When it has NewChannel", func() {
 			macCommands.NewChannel = newChannelPayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.Payloads()
+				payloads := macCommands.ToMACCommands()
 				So(payloads, ShouldHaveLength, 1)
-				expectedPayload := &lorawan.MACCommand{
+				expectedPayload := lorawan.MACCommand{
 					Payload: &newChannelPayload,
 					CID:     lorawan.NewChannelReq,
 				}
@@ -121,9 +121,9 @@ func TestMacCommandsPayloads(t *testing.T) {
 		Convey("When it has RXTimingSetup", func() {
 			macCommands.RXTimingSetup = rxTimingSetupPayload
 			Convey("When converting to slice", func() {
-				payloads := macCommands.Payloads()
+				payloads := macCommands.ToMACCommands()
 				So(payloads, ShouldHaveLength, 1)
-				expectedPayload := &lorawan.MACCommand{
+				expectedPayload := lorawan.MACCommand{
 					Payload: &rxTimingSetupPayload,
 					CID:     lorawan.RXTimingSetupReq,
 				}
@@ -139,7 +139,7 @@ func TestMacCommandsPayloads(t *testing.T) {
 			macCommands.NewChannel = newChannelPayload
 			macCommands.RXTimingSetup = rxTimingSetupPayload
 
-			payloads := macCommands.Payloads()
+			payloads := macCommands.ToMACCommands()
 
 			Convey("Then it has the appropriate length", func() {
 				So(payloads, ShouldHaveLength, 6)
